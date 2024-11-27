@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BGT Calculator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/web3@1.10.0/dist/web3.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="bg-gray-100 p-6">
+    <div class="max-w-6xl mx-auto">
+        <!-- Header -->
+        <div class="bg-white rounded-xl shadow-lg p-6 mb-6">
+            <div class="flex justify-between items-center">
+                <h1 class="text-2xl font-bold">BGT Calculator</h1>
+                <button onclick="refreshData()" 
+                        class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">
+                    Refresh Data
+                </button>
+            </div>
+            <div id="debug" class="mt-4 p-4 bg-gray-100 rounded-lg font-mono text-xs overflow-auto max-h-32"></div>
+        </div>
+
+        <!-- Main Grid -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <!-- Live Pool Data -->
+            <div class="bg-white rounded-xl shadow-lg p-6">
+                <h2 class="text-xl font-bold mb-4">Live Pool Data</h2>
+                <div id="poolData" class="p-4 bg-blue-50 rounded-lg">Loading...</div>
+                <div class="mt-4">
+                    <canvas id="priceChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Calculator -->
+            <div class="bg-white rounded-xl shadow-lg p-6">
+                <h2 class="text-xl font-bold mb-4">Position Calculator</h2>
+                <div class="grid grid-cols-1 gap-4 mb-4">
+                    <div>
+                        <label class="block text-sm font-medium mb-1">BERA Amount</label>
+                        <input type="number" id="beraInput" 
+                               class="w-full p-2 border rounded"
+                               placeholder="Enter BERA amount"/>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-1">Select Gauge</label>
+                        <select id="gaugeSelect" class="w-full p-2 border rounded">
+                            <!-- Gauges will be populated here -->
+                        </select>
+                    </div>
+                </div>
+                <button onclick="calculatePosition()" 
+                        class="w-full p-2 bg-blue-500 text-white rounded hover:bg-blue-600 mb-4">
+                    Calculate
+                </button>
+                <div id="result" class="p-4 bg-green-50 rounded-lg">
+                    Enter amount and select gauge to calculate
+                </div>
+            </div>
+
+            <!-- Gauge Comparison -->
+            <div class="bg-white rounded-xl shadow-lg p-6 lg:col-span-2">
+                <h2 class="text-xl font-bold mb-4">Gauge Comparison</h2>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Gauge</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">BGT Capture</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Daily BGT/1M$</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">APR</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="gaugeComparison">
+                            <!-- Gauge comparison data will be inserted here -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Historical Data -->
+            <div class="bg-white rounded-xl shadow-lg p-6 lg:col-span-2">
+                <h2 class="text-xl font-bold mb-4">Historical Data</h2>
+                <canvas id="historyChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Constants and configurations
+        const ADDRESSES = {
+            POOL: '0xd28d852cbcc68DCEC922f6d5C7a8185dBaa104B7',
+            CROC_QUERY: '0x8685CE9Db06D40CBa73e3d09e6868FE476B5dC89',
+            HONEY: '0x0E4aaF1351de4c0264C5c7056Ef3777b41BD8e03',
+            WBERA: '0x7507c1dc16935B82698e4C63f2746A2fCf994dF8'
+        };
+
+        const GAUGES = {
+            'LBGT-WBERA': { capture: 15.57, status: 'active' },
+            'YEET-WBERA': { capture: 15.39, status: 'active' },
+            'PAW-HONEY': { capture: 12.39, status: 'active' },
+            'tTERP': { capture: 10.02, status: 'active' },
+            'BRLY-ST': { capture: 7.22, status: 'active' },
+            'VDHONEY': { capture: 6.15, status: 'active' },
+            'HONEY-WBERA': { capture: 6.04, status: 'active' }
+        };
+
+        const DAILY_BGT = 400000;
+        let priceHistory = [];
+        let priceChart = null;
+        let historyChart = null;
+        let web3;
+
+        // Utility functions
+        function log(message) {
+            console.log(message);
+            const debugDiv = document.getElementById('debug');
+            debugDiv.innerHTML += `${new Date().toLocaleTimeString()}: ${message}<br>`;
+            debugDiv.scrollTop = debugDiv.scrollHeight;
+        }
+
+        function updatePriceChart() {
+            const ctx = document.getElementById('priceChart');
+            if (priceChart) {
+                priceChart.destroy();
+            }
+
+            priceChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: priceHistory.map(p => p.time),
+                    datasets: [{
+                        label: 'HONEY/WBERA Price',
+                        data: priceHistory.map(p => p.price),
+                        borderColor: 'rgb(59, 130, 246)',
+                        tension: 0.1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        y: {
+                            beginAtZero: false
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateHistoryChart(gauge) {
+            const ctx = document.getElementById('historyChart');
+            if (historyChart) {
+                historyChart.destroy();
+            }
+
+            // Generate mock historical data
+            const days = 30;
+            const data = Array.from({length: days}, (_, i) => ({
+                day: `Day ${days - i}`,
+                rewards: DAILY_BGT * (GAUGES[gauge].capture / 100) * (1 + Math.random() * 0.1 - 0.05)
+            }));
+
+            historyChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: data.map(d => d.day),
+                    datasets: [{
+                        label: 'Daily BGT Rewards',
+                        data: data.map(d => d.rewards),
+                        backgroundColor: 'rgba(59, 130, 246, 0.5)',
+                        borderColor: 'rgb(59, 130, 246)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        y: {
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+        }
+
+        // Core functionality
+        async function initWeb3() {
+            try {
+                log('Initializing Web3...');
+                web3 = new Web3('https://bartio.rpc.berachain.com');
+                const blockNumber = await web3.eth.getBlockNumber();
+                log(`Connected to Berachain. Block: ${blockNumber}`);
+                return true;
+            } catch (error) {
+                log(`Web3 initialization error: ${error.message}`);
+                return false;
+            }
+        }
+
+        async function getPrice() {
+            try {
+                const contract = new web3.eth.Contract([{
+                    "constant": true,
+                    "inputs": [
+                        {"internalType": "address", "name": "base", "type": "address"},
+                        {"internalType": "address", "name": "quote", "type": "address"},
+                        {"internalType": "uint256", "name": "poolIdx", "type": "uint256"}
+                    ],
+                    "name": "queryPrice",
+                    "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+                    "stateMutability": "view",
+                    "type": "function"
+                }], ADDRESSES.CROC_QUERY);
+
+                const sqrtPrice = await contract.methods.queryPrice(
+                    ADDRESSES.HONEY,
+                    ADDRESSES.WBERA,
+                    36000 // Known pool type
+                ).call();
+
+                const sq = Number(sqrtPrice) / Math.pow(2, 64);
+                const price = sq * sq;
+                
+                priceHistory.push({
+                    time: new Date().toLocaleTimeString(),
+                    price: price
+                });
+                if (priceHistory.length > 10) priceHistory.shift();
+                
+                return price;
+            } catch (error) {
+                log(`Error getting price: ${error.message}`);
+                throw error;
+            }
+        }
+
+        function calculateAPR(bgtPerDay, beraAmount) {
+            const annualBGT = bgtPerDay * 365;
+            return (annualBGT / beraAmount) * 100;
+        }
+
+        async function updateGaugeComparison() {
+            const tbody = document.getElementById('gaugeComparison');
+            const rows = Object.entries(GAUGES).map(([name, data]) => {
+                const dailyBGTper1M = DAILY_BGT * (data.capture / 100);
+                const apr = calculateAPR(dailyBGTper1M, 1000000);
+                
+                return `
+                    <tr class="hover:bg-gray-50">
+                        <td class="px-6 py-4">${name}</td>
+                        <td class="px-6 py-4">${data.capture}%</td>
+                        <td class="px-6 py-4">${dailyBGTper1M.toFixed(2)}</td>
+                        <td class="px-6 py-4">${apr.toFixed(2)}%</td>
+                        <td class="px-6 py-4">
+                            <span class="px-2 py-1 text-xs font-semibold rounded-full 
+                                       ${data.status === 'active' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'}">
+                                ${data.status}
+                            </span>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+            tbody.innerHTML = rows;
+        }
+
+        async function calculatePosition() {
+            const beraAmount = parseFloat(document.getElementById('beraInput').value);
+            const selectedGauge = document.getElementById('gaugeSelect').value;
+            
+            if (!beraAmount || !selectedGauge) {
+                document.getElementById('result').innerHTML = 'Please enter amount and select gauge';
+                return;
+            }
+
+            try {
+                const price = await getPrice();
+                const gaugeData = GAUGES[selectedGauge];
+                const honeyValue = beraAmount * price;
+                const dailyBGT = DAILY_BGT * (gaugeData.capture / 100) * (beraAmount / 1000000);
+                const apr = calculateAPR(dailyBGT, beraAmount);
+
+                document.getElementById('result').innerHTML = `
+                    <div class="space-y-2">
+                        <div>BERA Amount: ${beraAmount.toLocaleString()} BERA</div>
+                        <div>HONEY Value: ${honeyValue.toFixed(2)} HONEY</div>
+                        <div class="text-lg font-bold text-green-600">
+                            Daily BGT Rewards: ${dailyBGT.toFixed(2)} BGT
+                        </div>
+                        <div class="text-sm text-gray-600">
+                            APR: ${apr.toFixed(2)}%
+                        </div>
+                    </div>
+                `;
+
+                updateHistoryChart(selectedGauge);
+            } catch (error) {
+                log(`Calculation error: ${error.message}`);
+                document.getElementById('result').innerHTML = `Error: ${error.message}`;
+            }
+        }
+
+        async function refreshData() {
+            try {
+                const price = await getPrice();
+                document.getElementById('poolData').innerHTML = `
+                    <div class="space-y-2">
+                        <div class="font-bold">Current Price: ${price.toFixed(4)} HONEY/WBERA</div>
+                        <div class="text-sm text-gray-600">Last updated: ${new Date().toLocaleTimeString()}</div>
+                    </div>
+                `;
+                updatePriceChart();
+                updateGaugeComparison();
+            } catch (error) {
+                log(`Refresh error: ${error.message}`);
+            }
+        }
+
+        // Initialize
+        window.addEventListener('load', async () => {
+            log('Page loaded, initializing...');
+            
+            // Populate gauge select
+            const gaugeSelect = document.getElementById('gaugeSelect');
+            Object.keys(GAUGES).forEach(gauge => {
+                const option = document.createElement('option');
+                option.value = gauge;
+                option.textContent = gauge;
+                gaugeSelect.appendChild(option);
+            });
+
+            if (await initWeb3()) {
+                await refreshData();
+                
+                // Set up auto-refresh
+                setInterval(refreshData, 30000); // Every 30 seconds
+            }
+        });
+    </script>
+</body>
+</html>
